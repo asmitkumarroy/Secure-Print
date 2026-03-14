@@ -1,5 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { mkdir, writeFile } from 'fs/promises';
+import { extname, join } from 'path';
 import { PDFDocument } from 'pdf-lib';
 import { TokenRegistryService } from '../common/token-registry.service';
 import { CreateDocumentUploadDto } from './dto/create-document-upload.dto';
@@ -62,6 +64,7 @@ export class DocumentsService {
     const documentId = randomUUID();
     const printToken = randomUUID();
     const pages = await this.resolvePageCount(file, dto.pages);
+    const storedFilePath = await this.persistFile(documentId, file);
 
     this.tokenRegistry.register({
       token: printToken,
@@ -72,6 +75,9 @@ export class DocumentsService {
         copies: dto.copies,
         colorMode: dto.colorMode,
       },
+      filePath: storedFilePath,
+      fileName: file.originalname,
+      mimeType: file.mimetype,
     });
 
     return {
@@ -91,6 +97,30 @@ export class DocumentsService {
       },
       note: 'Storage, encryption, and token signing are next implementation steps.',
     };
+  }
+
+  private async persistFile(documentId: string, file: UploadedFileLike): Promise<string> {
+    if (!file.buffer || file.buffer.length === 0) {
+      throw new BadRequestException('File data missing while storing upload');
+    }
+
+    const uploadsDir = join(process.cwd(), 'uploads');
+    await mkdir(uploadsDir, { recursive: true });
+
+    const extension = extname(file.originalname).trim() || this.extensionFromMime(file.mimetype);
+    const fileName = `${documentId}${extension}`;
+    const filePath = join(uploadsDir, fileName);
+
+    await writeFile(filePath, file.buffer);
+    return filePath;
+  }
+
+  private extensionFromMime(mimeType: string): string {
+    if (mimeType === 'application/pdf') return '.pdf';
+    if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return '.docx';
+    if (mimeType === 'image/png') return '.png';
+    if (mimeType === 'image/jpeg') return '.jpg';
+    return '.bin';
   }
 
   private async resolvePageCount(file: UploadedFileLike, requestedPages?: number): Promise<number> {

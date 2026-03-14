@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useEffect, useMemo, useState } from 'react';
+import { getPrintStatus } from '../services/api';
 
 function formatRemaining(seconds: number) {
   const safe = Math.max(0, seconds);
@@ -17,6 +18,8 @@ export default function QrDisplayPage() {
   const [now, setNow] = useState(Date.now());
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [qrError, setQrError] = useState<string>('');
+  const [printStatus, setPrintStatus] = useState<'ready' | 'printing' | 'completed' | 'expired' | 'failed'>('ready');
+  const [printStatusMessage, setPrintStatusMessage] = useState('Waiting for shop to print...');
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -33,6 +36,46 @@ export default function QrDisplayPage() {
 
   const remainingSeconds = Math.floor((expiryMs - now) / 1000);
   const expired = remainingSeconds <= 0;
+
+  useEffect(() => {
+    if (typeof token !== 'string' || token.length < 5) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const status = await getPrintStatus(token);
+        if (cancelled) {
+          return;
+        }
+
+        setPrintStatus(status.status);
+        setPrintStatusMessage(status.message);
+      } catch (statusError) {
+        if (cancelled) {
+          return;
+        }
+
+        const message = statusError instanceof Error ? statusError.message : 'Unable to fetch print status';
+        if (message.toLowerCase().includes('expired')) {
+          setPrintStatus('expired');
+          setPrintStatusMessage('Token expired before printing.');
+        }
+      }
+    };
+
+    void poll();
+    const interval = setInterval(() => {
+      void poll();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [token]);
 
   useEffect(() => {
     if (typeof token !== 'string' || token.length < 5) {
@@ -110,10 +153,22 @@ export default function QrDisplayPage() {
         ) : null}
 
         <div className={`timer ${remainingSeconds < 300 ? 'timer-warning' : ''}`}>
-          {expired ? 'Token expired' : `QR expires in: ${formatRemaining(remainingSeconds)}`}
+          {printStatus === 'completed'
+            ? 'Printing completed'
+            : expired || printStatus === 'expired'
+              ? 'Token expired'
+              : `QR expires in: ${formatRemaining(remainingSeconds)}`}
         </div>
 
-        {expired ? <p className="status-error">This token has expired. Generate a new QR to continue.</p> : null}
+        {printStatus === 'completed' ? (
+          <p className="status-success">Printed successfully. This print request is complete.</p>
+        ) : expired || printStatus === 'expired' ? (
+          <p className="status-error">This token has expired. Generate a new QR to continue.</p>
+        ) : null}
+
+        <p className="muted" style={{ marginTop: 0 }}>
+          Status: {printStatusMessage}
+        </p>
 
         <p className="muted" style={{ margin: 0 }}>
           Pages: {typeof pages === 'string' ? pages : '-'} | Copies: {typeof copies === 'string' ? copies : '-'} | Color:{' '}
@@ -124,7 +179,7 @@ export default function QrDisplayPage() {
         </p>
 
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
-          <button type="button" disabled={expired}>
+          <button type="button" disabled={expired || printStatus === 'completed'}>
             Extend 10 min (coming soon)
           </button>
           <Link href="/upload">Cancel Print</Link>

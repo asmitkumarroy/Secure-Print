@@ -1,10 +1,10 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchPrintJob } from '../../services/api';
+import { completePrintJob, executePrintJob, fetchPrintJob, getPdfPreviewUrl, getPrintStatus } from '../../services/api';
 
 type PrintResult = {
   documentId?: string;
   token: string;
-  status: 'ready' | 'expired' | string;
+  status: 'ready' | 'printing' | 'completed' | 'expired' | 'failed' | string;
   settings?: {
     pages: number;
     copies: number;
@@ -43,12 +43,26 @@ function extractToken(raw: string): string {
 }
 
 function mapStatus(status: PrintResult['status']): QueueStatus {
+  if (status === 'completed') {
+    return 'done';
+  }
+
+  if (status === 'printing') {
+    return 'printing';
+  }
+
+  if (status === 'failed') {
+    return 'failed';
+  }
+
   if (status === 'expired') {
     return 'expired';
   }
+
   if (status === 'ready') {
     return 'pending';
   }
+
   return 'failed';
 }
 
@@ -74,11 +88,23 @@ export function TokenLookup() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [scannerEnabled, setScannerEnabled] = useState(false);
-  const [scannerPaused, setScannerPaused] = useState(false);
-  const [scannerMessage, setScannerMessage] = useState('Scanner paused. Use Start Scanner.');
+  const [scannerPaused, setScannerPaused] = useState(true);
+  const [autoPrint, setAutoPrint] = useState(false);
+  const [scannerMessage, setScannerMessage] = useState('Scanner paused. Click Start Scanner.');
   const [liveMessage, setLiveMessage] = useState('');
+  const [previewPages, setPreviewPages] = useState(1);
+  const [previewCopies, setPreviewCopies] = useState(1);
+  const [previewColorMode, setPreviewColorMode] = useState<'bw' | 'color'>('bw');
+  const [printing, setPrinting] = useState(false);
+  const [testSavePdfMode, setTestSavePdfMode] = useState(false);
+  const [previewBlockedMessage, setPreviewBlockedMessage] = useState<string | null>(null);
 
   const isExpiredError = error?.toLowerCase().includes('expired') ?? false;
+  const isPrintAssociationError =
+    error?.toLowerCase().includes('print-capable') ||
+    error?.toLowerCase().includes('default print') ||
+    error?.toLowerCase().includes('no application is associated') ||
+    false;
   const todaysStats = useMemo(() => {
     const todayDate = new Date().toDateString();
     const todaysJobs = queue.filter((job) => new Date(job.scannedAt).toDateString() === todayDate);
@@ -89,6 +115,7 @@ export function TokenLookup() {
     return {
       jobs: todaysJobs.length,
       pagesPrinted,
+      errors: todaysJobs.filter((job) => job.status === 'expired' || job.status === 'failed').length,
     };
   }, [queue]);
 
@@ -116,6 +143,131 @@ export function TokenLookup() {
   const upsertQueueItem = useCallback((job: QueueJob) => {
     setQueue((prev) => [job, ...prev.filter((q) => q.token !== job.token)].slice(0, 10));
   }, []);
+
+  const finalizePrinted = useCallback(
+    (jobToken: string, message: string) => {
+      setQueue((prev) =>
+        prev.map((job) =>
+          job.token === jobToken
+            ? {
+              ...job,
+              status: 'done',
+              message,
+            }
+            : job,
+        ),
+      );
+
+      setActiveJob((prev) => (prev && prev.token === jobToken ? { ...prev, status: 'done', message } : prev));
+    },
+    [],
+  );
+
+  const runPrint = useCallback(
+    async (job: QueueJob, settings: { pages: number; copies: number; colorMode: 'bw' | 'color' }) => {
+      if (job.status === 'expired' || job.status === 'done') {
+        const blockedMessage = job.status === 'expired' ? 'Token expired. Generate a new token.' : 'Token already used.';
+        setError(blockedMessage);
+        setLiveMessage(blockedMessage);
+        return;
+      }
+
+      setPrinting(true);
+      setError(null);
+
+      setQueue((prev) =>
+        prev.map((queued) =>
+          queued.token === job.token
+            ? {
+              ...queued,
+              status: 'printing',
+              pages: settings.pages,
+              copies: settings.copies,
+              colorMode: settings.colorMode,
+              message: 'Printing in progress...',
+            }
+            : queued,
+        ),
+      );
+
+      try {
+        const latestStatus = await getPrintStatus(job.token);
+        const mappedStatus = mapStatus(latestStatus.status);
+
+        if (mappedStatus === 'expired' || mappedStatus === 'done' || mappedStatus === 'failed') {
+          const blockedMessage =
+            mappedStatus === 'expired'
+              ? 'Token expired before print.'
+              : mappedStatus === 'done'
+                ? 'Token already printed.'
+                : latestStatus.message;
+
+          setQueue((prev) =>
+            prev.map((queued) =>
+              queued.token === job.token
+                ? {
+                  ...queued,
+                  status: mappedStatus,
+                  message: blockedMessage,
+                }
+                : queued,
+            ),
+          );
+
+          setActiveJob((prev) =>
+            prev && prev.token === job.token
+              ? {
+                ...prev,
+                status: mappedStatus,
+                message: blockedMessage,
+              }
+              : prev,
+          );
+
+          throw new Error(blockedMessage);
+        }
+
+        const printResponse = (await executePrintJob({
+          token: job.token,
+          pages: settings.pages,
+          copies: settings.copies,
+          colorMode: settings.colorMode,
+          testSaveAsPdf: testSavePdfMode,
+        })) as { savedPath?: string };
+
+        finalizePrinted(job.token, 'Printed and deleted.');
+        setActiveJob((prev) =>
+          prev && prev.token === job.token
+            ? {
+              ...prev,
+              pages: settings.pages,
+              copies: settings.copies,
+              colorMode: settings.colorMode,
+            }
+            : prev,
+        );
+        setLiveMessage(
+          testSavePdfMode
+            ? printResponse.savedPath
+              ? `Test mode: PDF saved at ${printResponse.savedPath}`
+              : 'Test mode: PDF saved locally on backend (Microsoft Print to PDF path).'
+            : 'Printed successfully. File deleted.',
+        );
+      } catch (printError) {
+        const printMessage = printError instanceof Error ? printError.message : 'Print failed';
+        setError(printMessage);
+        setQueue((prev) =>
+          prev.map((queued) =>
+            queued.token === job.token ? { ...queued, status: 'failed', message: printMessage } : queued,
+          ),
+        );
+        setLiveMessage(printMessage);
+      } finally {
+        setPrinting(false);
+      }
+    },
+    [finalizePrinted, testSavePdfMode],
+  );
 
   const handleFetch = useCallback(
     async (rawToken: string, source: 'manual' | 'scanner') => {
@@ -146,6 +298,9 @@ export function TokenLookup() {
         setResult(data);
         upsertQueueItem(queueItem);
         setActiveJob(queueItem);
+        setPreviewPages(queueItem.pages);
+        setPreviewCopies(queueItem.copies);
+        setPreviewColorMode(queueItem.colorMode);
         setDrawerOpen(true);
         setScannerMessage(
           source === 'scanner'
@@ -153,6 +308,41 @@ export function TokenLookup() {
             : 'Token fetched successfully.',
         );
         setLiveMessage('Print job ready. Preview drawer opened.');
+
+        if (source === 'scanner' && autoPrint) {
+          setQueue((prev) =>
+            prev.map((job) =>
+              job.token === queueItem.token
+                ? { ...job, status: 'printing', message: 'Auto-print in progress...' }
+                : job,
+            ),
+          );
+          setLiveMessage('Auto-print started.');
+          try {
+            const printResponse = (await executePrintJob({
+              token: queueItem.token,
+              pages: queueItem.pages,
+              copies: queueItem.copies,
+              colorMode: queueItem.colorMode,
+              testSaveAsPdf: testSavePdfMode,
+            })) as { savedPath?: string };
+            finalizePrinted(queueItem.token, 'Printed via auto-print. File deleted.');
+            setLiveMessage(
+              testSavePdfMode && printResponse.savedPath
+                ? `Auto-print saved PDF at ${printResponse.savedPath}`
+                : 'Auto-print completed.',
+            );
+          } catch (printError) {
+            const printMessage = printError instanceof Error ? printError.message : 'Auto-print failed';
+            setQueue((prev) =>
+              prev.map((job) =>
+                job.token === queueItem.token ? { ...job, status: 'failed', message: printMessage } : job,
+              ),
+            );
+            setError(printMessage);
+            setLiveMessage(printMessage);
+          }
+        }
       } catch (lookupError) {
         setResult(null);
         const message = lookupError instanceof Error ? lookupError.message : 'Lookup failed';
@@ -179,7 +369,7 @@ export function TokenLookup() {
         setLoading(false);
       }
     },
-    [upsertQueueItem],
+    [autoPrint, finalizePrinted, testSavePdfMode, upsertQueueItem],
   );
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -248,6 +438,106 @@ export function TokenLookup() {
   }, [handleFetch, scannerEnabled, scannerPaused, stopScanner]);
 
   useEffect(() => {
+    if (!activeJob) {
+      return;
+    }
+
+    setPreviewPages(activeJob.pages);
+    setPreviewCopies(activeJob.copies);
+    setPreviewColorMode(activeJob.colorMode);
+  }, [activeJob]);
+
+  useEffect(() => {
+    if (!drawerOpen || !activeJob) {
+      setPreviewBlockedMessage(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollStatus = async () => {
+      try {
+        const status = await getPrintStatus(activeJob.token);
+        if (cancelled) {
+          return;
+        }
+
+        const mappedStatus = mapStatus(status.status);
+        setQueue((prev) =>
+          prev.map((job) =>
+            job.token === activeJob.token
+              ? {
+                ...job,
+                status: mappedStatus,
+                message: status.message,
+              }
+              : job,
+          ),
+        );
+
+        setActiveJob((prev) =>
+          prev && prev.token === activeJob.token
+            ? {
+              ...prev,
+              status: mappedStatus,
+              message: status.message,
+            }
+            : prev,
+        );
+
+        if (mappedStatus === 'expired') {
+          setPreviewBlockedMessage('Token expired. Preview is no longer available.');
+        } else if (mappedStatus === 'done') {
+          setPreviewBlockedMessage('Token already printed. Preview is no longer available.');
+        } else if (mappedStatus === 'failed') {
+          setPreviewBlockedMessage(status.message);
+        } else {
+          setPreviewBlockedMessage(null);
+        }
+      } catch (statusError) {
+        if (cancelled) {
+          return;
+        }
+
+        const message = statusError instanceof Error ? statusError.message : 'Unable to refresh token status';
+        if (message.toLowerCase().includes('expired')) {
+          setPreviewBlockedMessage('Token expired. Preview is no longer available.');
+          setQueue((prev) =>
+            prev.map((job) =>
+              job.token === activeJob.token
+                ? {
+                  ...job,
+                  status: 'expired',
+                  message,
+                }
+                : job,
+            ),
+          );
+          setActiveJob((prev) =>
+            prev && prev.token === activeJob.token
+              ? {
+                ...prev,
+                status: 'expired',
+                message,
+              }
+              : prev,
+          );
+        }
+      }
+    };
+
+    void pollStatus();
+    const interval = setInterval(() => {
+      void pollStatus();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [activeJob, drawerOpen]);
+
+  useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
@@ -266,23 +556,28 @@ export function TokenLookup() {
         }
 
         event.preventDefault();
-        if (activeJob) {
-          setQueue((prev) =>
-            prev.map((job) =>
-              job.token === activeJob.token ? { ...job, status: 'done', message: 'Printed and deleted.' } : job,
-            ),
-          );
-          setActiveJob((prev) =>
-            prev ? { ...prev, status: 'done', message: 'Printed and deleted.' } : prev,
-          );
-          setLiveMessage('Printed successfully. File deleted.');
+        if (activeJob && !printing) {
+          void runPrint(activeJob, {
+            pages: previewPages,
+            copies: previewCopies,
+            colorMode: previewColorMode,
+          });
         }
+      }
+
+      if (event.ctrlKey && event.altKey && event.shiftKey && event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        setTestSavePdfMode((prev) => {
+          const next = !prev;
+          setLiveMessage(next ? 'Test save mode enabled.' : 'Test save mode disabled.');
+          return next;
+        });
       }
     }
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeJob, drawerOpen]);
+  }, [activeJob, drawerOpen, previewColorMode, previewCopies, previewPages, printing, runPrint]);
 
   useEffect(() => {
     return () => {
@@ -301,6 +596,10 @@ export function TokenLookup() {
           <span>Pages printed today</span>
           <strong>{todaysStats.pagesPrinted}</strong>
         </div>
+        <div className="shop-stat-card">
+          <span>Error rate today</span>
+          <strong>{todaysStats.jobs === 0 ? '0%' : `${Math.round((todaysStats.errors / todaysStats.jobs) * 100)}%`}</strong>
+        </div>
         <label className="shop-toggle">
           <input
             type="checkbox"
@@ -308,6 +607,14 @@ export function TokenLookup() {
             onChange={(event) => setScannerPaused(event.target.checked)}
           />
           <span>Pause Scanner</span>
+        </label>
+        <label className="shop-toggle">
+          <input
+            type="checkbox"
+            checked={autoPrint}
+            onChange={(event) => setAutoPrint(event.target.checked)}
+          />
+          <span>Auto Print</span>
         </label>
       </div>
 
@@ -321,7 +628,10 @@ export function TokenLookup() {
               <button
                 type="button"
                 className="scanner-overlay-btn"
-                onClick={() => setScannerEnabled(true)}
+                onClick={() => {
+                  setScannerEnabled(true);
+                  setScannerPaused(false);
+                }}
               >
                 Start Scanner
               </button>
@@ -331,6 +641,16 @@ export function TokenLookup() {
           <p className="muted" aria-live="polite">
             {scannerMessage}
           </p>
+
+          <div className="scanner-state-row">
+            <span className={`queue-badge ${scannerPaused ? 'queue-badge-expired' : 'queue-badge-printing'}`}>
+              {scannerPaused ? 'paused' : 'live'}
+            </span>
+            <span className="muted">Auto-fetch on scan {scannerPaused ? 'OFF' : 'ON'}</span>
+            <span className={`queue-badge ${autoPrint ? 'queue-badge-done' : 'queue-badge-pending'}`}>
+              auto-print {autoPrint ? 'on' : 'off'}
+            </span>
+          </div>
 
           <form onSubmit={onSubmit} className="shop-token-row">
             <input
@@ -351,6 +671,25 @@ export function TokenLookup() {
           </p>
 
           {error ? <p className={isExpiredError ? 'status-error' : 'status-warning'}>{error}</p> : null}
+          {isPrintAssociationError ? (
+            <div className="print-setup-note" role="alert">
+              <strong>Printer setup required on this Windows machine</strong>
+              <p>
+                The print command reached the server, but Windows could not find a print-capable PDF app.
+              </p>
+              <ol>
+                <li>Install SumatraPDF or Adobe Reader.</li>
+                <li>Set it as the default app for .pdf files.</li>
+                <li>Ensure a default printer is available.</li>
+                <li>Retry printing from this dashboard.</li>
+              </ol>
+            </div>
+          ) : null}
+          {scannerMessage.toLowerCase().includes('permission') ? (
+            <p className="status-warning">
+              Camera permission blocked. Allow camera access in browser settings or use token paste.
+            </p>
+          ) : null}
           {result ? (
             <p className="status-success" style={{ marginBottom: 0 }}>
               Last job: {result.status}
@@ -378,16 +717,36 @@ export function TokenLookup() {
                 </div>
                 <div style={{ display: 'grid', gap: 8, justifyItems: 'end' }}>
                   <span className={statusClassName(job.status)}>{job.status}</span>
-                  <button
-                    type="button"
-                    className="queue-view-btn"
-                    onClick={() => {
-                      setActiveJob(job);
-                      setDrawerOpen(true);
-                    }}
-                  >
-                    View
-                  </button>
+                  <div className="queue-actions">
+                    <button
+                      type="button"
+                      className="queue-view-btn"
+                      onClick={() => {
+                        setActiveJob(job);
+                        setDrawerOpen(true);
+                      }}
+                    >
+                      View
+                    </button>
+                    {job.status === 'failed' || job.status === 'expired' ? (
+                      <button type="button" className="queue-view-btn" onClick={() => void handleFetch(job.token, 'manual')}>
+                        Retry
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="queue-view-btn"
+                      onClick={() => {
+                        setQueue((prev) => prev.filter((q) => q.id !== job.id));
+                        if (activeJob?.id === job.id) {
+                          setDrawerOpen(false);
+                          setActiveJob(null);
+                        }
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               </li>
             ))}
@@ -413,30 +772,90 @@ export function TokenLookup() {
                 <p style={{ margin: '6px 0 0', wordBreak: 'break-all' }}>{activeJob.token}</p>
               </div>
               <div className="preview-meta-row">
-                <span>{activeJob.pages} pages</span>
-                <span>{activeJob.copies} copies</span>
-                <span>{activeJob.colorMode}</span>
+                <span>{previewPages} pages</span>
+                <span>{previewCopies} copies</span>
+                <span>{previewColorMode}</span>
               </div>
+
+              <div className="preview-controls">
+                <label>
+                  Pages
+                  <input
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={previewPages}
+                    onChange={(event) => setPreviewPages(Number(event.target.value) || 1)}
+                  />
+                </label>
+                <label>
+                  Copies
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={previewCopies}
+                    onChange={(event) => setPreviewCopies(Number(event.target.value) || 1)}
+                  />
+                </label>
+                <label>
+                  Color
+                  <select value={previewColorMode} onChange={(event) => setPreviewColorMode(event.target.value as 'bw' | 'color')}>
+                    <option value="bw">Black & White</option>
+                    <option value="color">Color</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="pdf-preview-shell">
+                {previewBlockedMessage ? (
+                  <div className="status-warning" style={{ margin: 0 }}>
+                    {previewBlockedMessage}
+                  </div>
+                ) : (
+                  <iframe
+                    key={activeJob.token}
+                    src={getPdfPreviewUrl(activeJob.token)}
+                    title="PDF preview"
+                    className="pdf-preview-frame"
+                  />
+                )}
+              </div>
+              <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                Scroll to inspect PDF pages. Preview is available for PDF files only.
+              </p>
             </div>
 
             <div className="preview-actions">
               <button
                 type="button"
-                onClick={() => {
-                  setQueue((prev) =>
-                    prev.map((job) =>
-                      job.token === activeJob.token
-                        ? { ...job, status: 'done', message: 'Printed and deleted.' }
-                        : job,
-                    ),
-                  );
-                  setActiveJob((prev) =>
-                    prev ? { ...prev, status: 'done', message: 'Printed and deleted.' } : prev,
-                  );
-                  setLiveMessage('Printed. File deleted.');
+                disabled={printing || !!previewBlockedMessage}
+                onClick={() =>
+                  void runPrint(activeJob, {
+                    pages: previewPages,
+                    copies: previewCopies,
+                    colorMode: previewColorMode,
+                  })
+                }
+              >
+                {printing ? 'Printing...' : 'Print'}
+              </button>
+              <button
+                type="button"
+                className="queue-view-btn"
+                onClick={async () => {
+                  try {
+                    await completePrintJob({ token: activeJob.token, documentId: activeJob.documentId });
+                    finalizePrinted(activeJob.token, 'Marked printed manually.');
+                    setLiveMessage('Marked printed manually.');
+                  } catch (completeError) {
+                    const message = completeError instanceof Error ? completeError.message : 'Unable to mark completion';
+                    setError(message);
+                    setLiveMessage(message);
+                  }
                 }}
               >
-                Print
+                Mark Printed
               </button>
               <button type="button" className="cta-link cta-secondary" onClick={() => setDrawerOpen(false)}>
                 Cancel
@@ -446,6 +865,11 @@ export function TokenLookup() {
             <p className="muted" style={{ marginBottom: 0 }}>
               This file will be auto-deleted after printing. No file content is kept in shop logs.
             </p>
+            {testSavePdfMode ? (
+              <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                Test save mode is active for this station.
+              </p>
+            ) : null}
           </>
         ) : (
           <p className="muted">No active job selected.</p>
