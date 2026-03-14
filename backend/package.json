@@ -39,8 +39,4 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.6.3"
   }
-  "scripts": {
-  "build": "nest build",
-  "start:prod": "node dist/main.js"
-}
 }

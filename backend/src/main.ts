@@ -5,11 +5,13 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Enable CORS
   app.enableCors({
-    origin: true,
+    origin: process.env.FRONTEND_URL || '*',
     credentials: true,
   });
 
+  // Global validation
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -18,10 +20,11 @@ async function bootstrap() {
     }),
   );
 
-  const port = Number(process.env.PORT ?? 3000);
+  const port = parseInt(process.env.PORT || '3000', 10);
+
   await app.listen(port);
-  // Keep startup log simple for local setup verification.
-  console.log(`SecurePrint backend running on http://localhost:${port}`);
+
+  console.log(`🚀 SecurePrint backend running on port ${port}`);
 }
 
-void bootstrap();
+bootstrap();
