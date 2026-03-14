@@ -1,0 +1,68 @@
+:root {
+  --bg: #f7f3ea;
+  --ink: #1f1a16;
+  --accent: #0f766e;
+  --card: #fffdf9;
+  --muted: #685d52;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+  background: radial-gradient(circle at top, #fff9ef, #f2e9db 55%, #e7dccd);
+  color: var(--ink);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+main {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid #d7cab7;
+  border-radius: 14px;
+  padding: 18px;
+  box-shadow: 0 8px 24px rgba(52, 37, 20, 0.08);
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+}
+
+@media (min-width: 900px) {
+  .grid-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+button {
+  background: var(--accent);
+  color: #ffffff;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+input,
+select {
+  width: 100%;
+  border: 1px solid #c4b39e;
+  border-radius: 8px;
+  padding: 10px;
+}
