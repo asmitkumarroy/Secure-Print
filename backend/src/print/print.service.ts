@@ -1,12 +1,29 @@
-import { Injectable } from '@nestjs/common';
+import { GoneException, Injectable, NotFoundException } from '@nestjs/common';
+import { TokenRegistryService } from '../common/token-registry.service';
 
 @Injectable()
 export class PrintService {
+  constructor(private readonly tokenRegistry: TokenRegistryService) {}
+
   fetchByToken(token: string) {
+    const record = this.tokenRegistry.find(token);
+
+    if (!record) {
+      throw new NotFoundException('Token not found');
+    }
+
+    const expiresAtMs = Date.parse(record.expiresAt);
+    if (!Number.isNaN(expiresAtMs) && expiresAtMs <= Date.now()) {
+      throw new GoneException('Token expired');
+    }
+
     return {
       token,
-      status: 'pending-implementation',
-      message: 'Token verification, single-use enforcement, and file fetch are next.',
+      documentId: record.documentId,
+      status: 'ready',
+      expiresAt: record.expiresAt,
+      settings: record.settings,
+      message: 'Token is valid and ready for printing.',
     };
   }
 

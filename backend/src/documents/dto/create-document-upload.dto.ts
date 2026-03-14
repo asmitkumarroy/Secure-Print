@@ -3,10 +3,11 @@ import { IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
 
 export class CreateDocumentUploadDto {
   @Type(() => Number)
+  @IsOptional()
   @IsInt()
   @Min(1)
   @Max(1000)
-  pages!: number;
+  pages?: number;
 
   @Type(() => Number)
   @IsInt()

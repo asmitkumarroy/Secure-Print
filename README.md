@@ -62,11 +62,11 @@ cd "c:\Users\royas\Desktop\Personal-Projects\Secure Print\backend"
 npm run start:dev
 ```
 
-Frontend (port `3001`):
+Frontend (port `3005`):
 
 ```powershell
 cd "c:\Users\royas\Desktop\Personal-Projects\Secure Print\frontend"
-npm run dev -- -p 3001
+npm run dev
 ```
 
 ## Current API Skeleton
